@@ -56,6 +56,7 @@ struct Tcp_header{
 };
 #pragma pack(pop)
 
+
 static unsigned char ascii2byte(char *val);
 
 int getmyMAC(char* buf, char* dev);
